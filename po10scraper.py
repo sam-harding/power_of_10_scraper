@@ -3,10 +3,14 @@ import urllib
 import pprint
 import re
 import redis
+import sys
+
 #set up pretty printer
 pp = pprint.PrettyPrinter(indent = 4)
-event_list_milliseconds = ["100", "200", "400", "800", "1500", "3000"]
-convert_blocker = ["DNF", "DNS", "DQ"]
+event_list_milliseconds = ["60", "100", "150", "200", "400", "600", "800", "1500", "3000", "5000", "10000", "5K", "parkrun"]
+event_list_millimetres = ["LJ", "SP5K"]
+event_list_ignore = ["ZXC"]
+convert_blocker = ["DNF", "DNS", "DQ", "TBC"]
 
 #Initialize Redis Connection
 redis = redis.StrictRedis(host='localhost', port=6379)
@@ -120,9 +124,9 @@ def convert_athlete_2_hash(debug = False, athlete_id = None):
       if i.a != None and output_headers[idx] != "":
         url_to_get = i.a["href"]
         output_hash[output_headers[idx] +  "_id"] = url_to_get
-        print("Searching " + url_to_get)
+        #print("Searching " + url_to_get)
         m = re.search("(?<==).+?&", url_to_get)
-        print(m.group(0))
+        #print(m.group(0))
 
 
 
@@ -132,17 +136,23 @@ def convert_athlete_2_hash(debug = False, athlete_id = None):
       elif output_headers[idx] == "Perf":
         perf = i.get_text()
 
-    print("perf" + perf)
-    if perf in convert_blocker:
+    if perf not in convert_blocker:
       if event in event_list_milliseconds:
         perf = time_to_milliseconds(perf)
-    
+      elif event in event_list_millimetres:
+        perf = distance_to_millimetres(perf)
+      elif event in event_list_ignore:
+        continue
+      else:
+        print(event + " not found. Perf = " + perf)
       if event not in athlete_pbs or perf < athlete_pbs[event]:
         athlete_pbs[event] = perf
 
     output["perf"].append(output_hash)
 
-  print(athlete_pbs)
+  # Put PBs to Redis
+  for pb_event, pb_result in athlete_pbs.items():
+    redis.hset(athlete_id, "pb:" + pb_event, pb_result)
   return output
 
 def time_to_milliseconds(time_string):
@@ -159,21 +169,30 @@ def time_to_milliseconds(time_string):
   #Split seconds into its second and millisecond part
   seconds_split = seconds.split(".")
   output_time += 1000 * int(seconds_split[0])
-
-  if len(seconds_split[1]) == 2:
-    output_time += 10 * int(seconds_split[1])
-  elif len(seconds_split[1]) == 3:
-    output_time += int(seconds_split[1])
-  elif len(seconds_split[1]) == 1:
-    output_time += 100 * int(seconds_split[1])
-  else:
-    print("Something has gone wrong trying to split " + seconds_split)
+  if len(seconds_split) == 2:
+    if len(seconds_split[1]) == 2:
+      output_time += 10 * int(seconds_split[1])
+    elif len(seconds_split[1]) == 3:
+      output_time += int(seconds_split[1])
+    elif len(seconds_split[1]) == 1:
+      output_time += 100 * int(seconds_split[1])
+    else:
+      print("Something has gone wrong trying to split " + seconds_split)
 
   return output_time
 
+def distance_to_millimetres(distance_string):
+  output_distance = 0
+  metres = distance_string
+  #Split distance into its metres
+  split_distance = distance_string.split(".")
+  if len(split_distance) == 2:
+    output_distance += 1000 * int(split_distance[0])
+    output_distance += 10 * int(split_distance[1])
+  else:
+    print("distance_to_millimetres has gone mad with " + distance_string)
 
-
-
+  return output_distance
 
 
 #pp.pprint(convert_ranking_table_2_hash(debug = True))
@@ -183,9 +202,25 @@ def time_to_milliseconds(time_string):
 #print(time_to_milliseconds("53.630"))
 
 
-pp.pprint(convert_athlete_2_hash(athlete_id = "1382"))
+#convert_athlete_2_hash(athlete_id = "208016")
 #pp.pprint(convert_athlete_2_hash('file:///Users/sam/Development/power_of_10/webpages/samharding.html'))
 #convert_athlete_2_hash('file:///Users/sam/Development/power_of_10/webpages/samharding.html')
+
+def iterate_through_and_load():
+  ranking_array = convert_ranking_table_2_hash(event = "100", age_group = "ALL", sex = "M")
+  count = 0
+  for each in ranking_array:
+    try:
+      convert_athlete_2_hash(athlete_id = each["Name_id"])
+    except KeyError:
+      print(each)
+    print("Loaded " + each["Name"] + " count = " + str(count))
+    count += 1
+    if count > 60:
+      break
+
+
+iterate_through_and_load()
 
 
 
