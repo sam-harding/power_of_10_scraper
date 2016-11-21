@@ -2,19 +2,141 @@ from bs4 import BeautifulSoup
 import urllib
 import pprint
 import re
-import redis
+import redis as redis_module
 import sys
 
 #set up pretty printer
 pp = pprint.PrettyPrinter(indent = 4)
-event_list_milliseconds = ["60", "100", "150", "200", "400", "600", "800", "1500", "3000", "5000", "10000", "5K", "parkrun"]
+event_list_milliseconds = ["60", "100", "150", "200", "400", "600", "800", "1500", "3000", "5000", "10000", "3000SC", "5K", "parkrun"]
 event_list_millimetres = ["LJ", "SP5K"]
 event_list_ignore = ["ZXC"]
 convert_blocker = ["DNF", "DNS", "DQ", "TBC"]
 
 #Initialize Redis Connection
-redis = redis.StrictRedis(host='localhost', port=6379)
+redis = redis_module.StrictRedis(host='localhost', port=6379)
 redis.flushdb()
+
+
+def cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M", year = "2016", debug = False):
+  # Initialize output variables
+  output = []
+  output_headers = []
+
+  #Resolve parameters into ranking url
+  #eg. http://www.powerof10.info/rankings/rankinglist.aspx?event=800&agegroup=ALL&sex=M&year=2016
+  if debug == True:
+    url = "file:///Users/sam/Development/power_of_10/webpages/800mranking.html"
+  else:
+    url = "http://www.powerof10.info/rankings/rankinglist.aspx?event=" + event + "&agegroup=" + age_group + "&sex=" + sex + "&year=" + year
+
+  # Initialize URL and BeautifulSoup
+  r = urllib.urlopen(url).read()
+  soup = BeautifulSoup(r, "html.parser")
+
+  # Iterate through rankings
+  table = soup.find("span", {"id" : "cphBody_lblCachedRankingList"}).find("table").find_all("tr")
+  output_hash = {}
+  for row in table:
+
+    if "style" in row.attrs:
+      print(row.prettify())
+      continue
+    elif row.get('class')[0] == 'rankinglistsubheader':
+      if row.text == "Resident Non UK Athletes":
+        break
+    else:
+      count = 0
+      skip = False
+      another_time = 0
+      for item in row:
+        # Handle ranking place
+        if count == 0:
+          if item.text == '':
+            another_time += 1
+          elif not item.text.isdigit():
+            skip = True
+          else:
+            output_hash = {}
+            output_hash["rank"] = item.text
+
+          if skip:
+            continue
+
+
+
+        if count == 1:
+          if not another_time:
+            output_hash["perf"] = item.text
+          elif another_time > 0:
+            output_hash["other_perf_" + str(another_time)] = item.text.lstrip()
+
+        if count == 2:
+          if item.text != '':
+            if another_time > 0:
+              output_hash["other_perf_" + str(another_time) + "_flag"] = item.text
+            else:
+              output_hash["perf_flag"] = item.text
+
+        if count == 3:
+          if another_time == 0:
+            output_hash["perf_wind"] = item.text
+          elif another_time > 0:
+            output_hash["other_perf_" + str(another_time) + "_wind"] = item.text
+
+        if count == 4:
+          if another_time == 0:
+            output_hash["pb"] = item.text
+
+        if count == 5:
+          if another_time == 0:
+            if item.text == "PB":
+              output_hash["is_pb"] = True
+            else:
+              output_hash["is_pb"] = False
+
+        if count == 6:
+          if another_time == 0:
+            output_hash["name"] = item.text
+
+        if count == 7:
+          if another_time == 0 and not item.text == "":
+            output_hash["age_flag"] = item.text
+
+        if count == 8:
+          if another_time == 0:
+            output_hash["DoB"] = item.text
+
+        if count == 9:
+          if another_time == 0:
+            output_hash["lead_coach"] = item.text
+
+        if count == 10:
+          if another_time == 0:
+            output_hash["club"] = item.text
+
+        if count == 11:
+          if another_time == 0:
+            output_hash["perf_venue"] = item.text
+          elif another_time > 0:
+            output_hash["other_perf_" + str(another_time) + "_venue"] = item.text
+
+        if count == 12:
+          if another_time == 0:
+            output_hash["perf_date"] = item.text
+          elif another_time > 0:
+            output_hash["other_perf_" + str(another_time) + "_date"] = item.text
+
+
+
+        count += 1
+
+    if not another_time or skip:    
+      output.append(output_hash)
+
+  print len(output)
+  return output
+
+
 
 def convert_ranking_table_2_hash(debug = False, event = "100", age_group = "ALL", sex = "M", year = "2016"):
   #Initialize output variables
@@ -35,6 +157,7 @@ def convert_ranking_table_2_hash(debug = False, event = "100", age_group = "ALL"
 
   #Find headers and distribute to varible so can reference later on
   headers = soup.find_all("tr", class_="rankinglistheadings")
+
   for header_title in headers:
     row = header_title.find_all("td")
 
@@ -64,7 +187,32 @@ def convert_ranking_table_2_hash(debug = False, event = "100", age_group = "ALL"
         output_hash[output_headers[idx] + "_id"] = re_id
       output_hash[output_headers[idx]] = i.get_text()
 
+    if output_hash["Name"] == "":
+      continue #continue if Name is none because it is a wind time
     output.append(output_hash)
+    #print(output_hash)
+    #Insert athlete into ranking on redis
+    #redis.incr("ranking_count")
+    ranking_count = redis.get("ranking_count")
+
+    # Make sure perf and pb are converted
+    if event in event_list_milliseconds:
+      perf = time_to_milliseconds(output_hash["Perf"])
+      pb = time_to_milliseconds(output_hash["PB"])
+    elif event in event_list_millimetres:
+      perf = distance_to_millimetres(output_hash["Perf"])
+      pb = distance_to_millimetres(output_hash["PB"])
+    elif event in event_list_ignore:
+      continue
+    else:
+      print(event + " not found. Perf = " + perf)
+
+    #redis.sadd("ranking_" + event + "_" + age_group + "_" + sex + "_" + year, ranking_count)
+    #redis.hmset("ranking_id:" + str(ranking_count), 
+                # {"athlete_id": output_hash["Name_id"],
+                # "athlete_name": output_hash["Name"],
+                # "perf": perf,
+                # "pb": pb})
   return output
 
 
@@ -155,7 +303,30 @@ def convert_athlete_2_hash(debug = False, athlete_id = None):
     redis.hset(athlete_id, "pb:" + pb_event, pb_result)
   return output
 
+
+def is_time_automatic(time_string):
+  if (re.search('[a-zA-Z]', time_string)):
+    time_string = re.sub("[a-zA-Z]", "", time_string)
+  else:
+    time_string = time_string
+
+  split_time = time_string.split(".")
+  if len(split_time) != 2:
+    print("is_time_automatic fails on " + time_string)
+    return False
+  if len(split_time[1]) == 1:
+    return False
+  else:
+    return True
+
 def time_to_milliseconds(time_string):
+  #strip i from string if indoor
+  if (re.search('[a-zA-Z]', time_string)):
+    time_string = re.sub("[a-zA-Z]", "", time_string)
+  else:
+    time_string = time_string
+
+
   output_time = 0
   seconds = time_string
   #Split time in to its minutes
@@ -197,7 +368,7 @@ def distance_to_millimetres(distance_string):
 
 #pp.pprint(convert_ranking_table_2_hash(debug = True))
 #pp.pprint(convert_ranking_table_2_hash(event = "100", age_group = "ALL", sex = "M"))
-
+pp.pprint(cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M"))
 
 #print(time_to_milliseconds("53.630"))
 
@@ -220,7 +391,21 @@ def iterate_through_and_load():
       break
 
 
-iterate_through_and_load()
+#iterate_through_and_load()
 
 
 
+def iterate_rankings():
+  events = ["100", "200", "400", "800", "1500", "3000", "5000", "10000", "3000SC"]
+  years = ["2016", "2015", "2014", "2013", "2012", "2011", "2010", "2009", "2008", "2007", "2006", "alltime"]
+  genders = ["M", "W"]
+  age_groups = ["ALL"]
+
+  for event in events:
+    for year in years:
+      for gender in genders:
+        for age_group in age_groups:
+          convert_ranking_table_2_hash(event = event, age_group = age_group, sex = gender, year = year)
+          print ("Loaded " + event + " " + age_group + " " + gender + " " + year)
+
+#iterate_rankings()
