@@ -2,7 +2,8 @@ from bs4 import BeautifulSoup
 import urllib
 import pprint
 import re
-import redis as redis_module
+#import redis as redis_module
+import mysql.connector as mariadb
 import sys
 
 #set up pretty printer
@@ -12,9 +13,9 @@ event_list_millimetres = ["LJ", "SP5K"]
 event_list_ignore = ["ZXC"]
 convert_blocker = ["DNF", "DNS", "DQ", "TBC"]
 
-#Initialize Redis Connection
-redis = redis_module.StrictRedis(host='localhost', port=6379)
-redis.flushdb()
+#Initialize MariaDB Connection
+mariadb_connection = mariadb.connect(user='root', password='', database='power_of_ten')
+cursor = mariadb_connection.cursor()
 
 
 def cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M", year = "2016", debug = False):
@@ -66,7 +67,7 @@ def cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M", yea
 
         if count == 1:
           if not another_time:
-            output_hash["perf"] = item.text
+            output_hash["perf"] = time_to_milliseconds(item.text)
           elif another_time > 0:
             output_hash["other_perf_" + str(another_time)] = item.text.lstrip()
 
@@ -85,7 +86,7 @@ def cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M", yea
 
         if count == 4:
           if another_time == 0:
-            output_hash["pb"] = item.text
+            output_hash["pb"] = time_to_milliseconds(item.text)
 
         if count == 5:
           if another_time == 0:
@@ -97,9 +98,14 @@ def cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M", yea
         if count == 6:
           if another_time == 0:
             output_hash["name"] = item.text
+            url_to_get = item.a["href"]
+            #Regex to get id from http://www.thepowerof10.info/athletes/profile.aspx?athleteid=2326
+            #Regex to get id from
+            m = re.search('(?<=athleteid=)\d+', url_to_get)
+            output_hash["athlete_id"] = m.group(0)
 
         if count == 7:
-          if another_time == 0 and not item.text == "":
+          if another_time == 0:
             output_hash["age_flag"] = item.text
 
         if count == 8:
@@ -193,7 +199,7 @@ def convert_ranking_table_2_hash(debug = False, event = "100", age_group = "ALL"
     #print(output_hash)
     #Insert athlete into ranking on redis
     #redis.incr("ranking_count")
-    ranking_count = redis.get("ranking_count")
+    #ranking_count = redis.get("ranking_count")
 
     # Make sure perf and pb are converted
     if event in event_list_milliseconds:
@@ -239,7 +245,7 @@ def convert_athlete_2_hash(debug = False, athlete_id = None):
   ath_name = ath_name[0].find_all("td")
   ath_name = ath_name[0].find_all("h2")
   ath_name[0].get_text().lstrip()
-  redis.hset(athlete_id, "name_full", ath_name[0].get_text().lstrip())
+  #redis.hset(athlete_id, "name_full", ath_name[0].get_text().lstrip())
 
   #Get athlete information
   ath_info = soup.find_all("div", id="cphBody_pnlAthleteDetails")
@@ -299,8 +305,8 @@ def convert_athlete_2_hash(debug = False, athlete_id = None):
     output["perf"].append(output_hash)
 
   # Put PBs to Redis
-  for pb_event, pb_result in athlete_pbs.items():
-    redis.hset(athlete_id, "pb:" + pb_event, pb_result)
+  #for pb_event, pb_result in athlete_pbs.items():
+    #redis.hset(athlete_id, "pb:" + pb_event, pb_result)
   return output
 
 
@@ -368,7 +374,7 @@ def distance_to_millimetres(distance_string):
 
 #pp.pprint(convert_ranking_table_2_hash(debug = True))
 #pp.pprint(convert_ranking_table_2_hash(event = "100", age_group = "ALL", sex = "M"))
-pp.pprint(cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M"))
+#pp.pprint(cycle_through_ranking_table(event = "100", age_group = "ALL", sex = "M"))
 
 #print(time_to_milliseconds("53.630"))
 
@@ -395,17 +401,33 @@ def iterate_through_and_load():
 
 
 
-def iterate_rankings():
-  events = ["100", "200", "400", "800", "1500", "3000", "5000", "10000", "3000SC"]
-  years = ["2016", "2015", "2014", "2013", "2012", "2011", "2010", "2009", "2008", "2007", "2006", "alltime"]
+def iterate_rankings_and_load():
+  events = ["100"] #, "200", "400", "800", "1500", "3000", "5000", "10000", "3000SC"]
+  years = ["2016"]#, "2015", "2014", "2013", "2012", "2011", "2010", "2009", "2008", "2007", "2006", "alltime"]
   genders = ["M", "W"]
   age_groups = ["ALL"]
+  ranking_id_count = 0
 
   for event in events:
     for year in years:
       for gender in genders:
         for age_group in age_groups:
-          convert_ranking_table_2_hash(event = event, age_group = age_group, sex = gender, year = year)
-          print ("Loaded " + event + " " + age_group + " " + gender + " " + year)
+          #convert_ranking_table_2_hash(event = event, age_group = age_group, sex = gender, year = year)
+          print ("Loading " + event + " " + age_group + " " + gender + " " + year)
+          ranking_hash = cycle_through_ranking_table(event = event, age_group = age_group, year = year, sex = gender)
+          #redis.flushdb()
+          cursor.execute("DELETE FROM ranking WHERE ranking_year = %s AND ranking_gender = %s AND ranking_event = %s AND ranking_age = %s", (year, gender, event, age_group))
 
-#iterate_rankings()
+          for r in ranking_hash:
+            print r
+            if "perf" in r:
+              cursor.execute("INSERT INTO ranking (rank, perf, is_main, pb, name, age_group, ranking_year, ranking_event, ranking_gender, ranking_age, athlete_id) \
+                                          VALUES (%s, %s, 1, %s, %s, %s, %s, %s, %s, %s, %s)", 
+                                          (r["rank"], r["perf"], r["pb"], r["name"], r["age_flag"], year, event, gender, age_group, r["athlete_id"]))
+              pass
+              #print("Ranking perf = " + ranking["perf"])
+              #ranking_id = "ranking_id:" + str(ranking_id_count)
+              #perf = time_to_milliseconds(ranking["perf"])
+              #redis.zadd("ranking:" + event + ":" + age_group + ":" + gender + ":" + year, perf, ranking_id)
+            mariadb_connection.commit()
+iterate_rankings_and_load()
